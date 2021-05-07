@@ -16,13 +16,14 @@ struct triangle_hit
     float uvw[3];
 };
 
-#if 0
 struct shading_info
 {
     vec3f p;
     vec3f n;
     vec3f c;
 };
+
+#if 0
 
 struct csg_node
 {
@@ -68,7 +69,12 @@ struct csg_object
 
 #endif
 
-bool intersect(const vec3f* vertices, const ray& ray, const range& r, triangle_hit* hit)
+struct shape
+{
+    virtual bool intersect(const ray& ray, const range& r, shading_info* shade) = 0;
+};
+
+bool intersect_triangle(const vec3f* vertices, const ray& ray, const range& r, triangle_hit* hit)
 {
     vec3f e0 = vertices[1] - vertices[0];
     vec3f e1 = vertices[2] - vertices[0];
@@ -124,28 +130,53 @@ vec3f randomInTriangle(const vec3f* vertices)
     return uvwTriangleToPoint(vertices, u, v, w);
 }
 
+struct triangle : public shape
+{
+    vec3f vertices[3];
+    triangle(const vec3f* vertices_)
+    {
+        vertices[0] = vertices_[0];
+        vertices[1] = vertices_[1];
+        vertices[2] = vertices_[2];
+    }
+    virtual bool intersect(const ray& ray, const range& r, shading_info* shade)
+    {
+        triangle_hit hit;
+        bool hits = intersect_triangle(vertices, ray, r, &hit);
+        if(hits) {
+            shade->p = uvwTriangleToPoint(vertices, hit.uvw[0], hit.uvw[1], hit.uvw[2]);
+            shade->n = {0, 0, 0}; // XXX
+            shade->c = {1, 1, 1}; // XXX
+        }
+        return hits;
+    }
+};
+
 vec3f cast(float u, float v)
 {
     vec3f onplane = {(u - .5f) * 2, (v - .5f) * 2, -1.0f}; // one meter away down Z
-    vec3f light[3] = {{.3, .3, 0}, {.3, .6, 0}, {.6, .6, 0}};
-    vec3f blocker[3] = {{0, 0, -1}, {.4, .3, -.8}, {.3, .4, -.8}};
+    vec3f light_vertices[3] = {{.3, .3, 0}, {.3, .6, 0}, {.6, .6, 0}};
+    triangle light(light_vertices);
 
-    triangle_hit hit;
+    vec3f blocker_vertices[3] = {{0, 0, -1}, {.4, .3, -.8}, {.3, .4, -.8}};
+    triangle blocker(blocker_vertices);
+
+    shading_info shade;
 
     ray blockerTestRay = {{0, 0, 0}, onplane};
 
-    if(intersect(blocker, blockerTestRay, {-FLT_MAX, FLT_MAX}, &hit)) {
+    if(blocker.intersect(blockerTestRay, {-FLT_MAX, FLT_MAX}, &shade)) {
 
         return {1, 1, 1};
 
     } else {
 
         /* cast to random points on light */
-        vec3f lightpoint = randomInTriangle(light);
+        vec3f lightpoint = randomInTriangle(light_vertices);
 
         ray shadowTestRay = {onplane, vec_normalize(lightpoint - onplane)};
 
-        if(!intersect(blocker, shadowTestRay, {-FLT_MAX, FLT_MAX}, &hit)) {
+        if(!blocker.intersect(shadowTestRay, {-FLT_MAX, FLT_MAX}, &shade)) {
 
             // return {u, v, .5};
             return {fabsf(shadowTestRay.m_direction[0]), fabsf(shadowTestRay.m_direction[1]), fabsf(shadowTestRay.m_direction[2])};
@@ -159,7 +190,7 @@ int main(int argc, char **argv)
 {
     constexpr int width = 512;
     constexpr int height = 512;
-    constexpr int sampleCount = 1000;
+    constexpr int sampleCount = 1;
     uint8_t img[height * width * 3];
 
     for(int y = 0; y < height; y++) {
