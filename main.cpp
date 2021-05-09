@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdio>
 #include <cassert>
 #include <cstdint>
@@ -21,57 +22,13 @@ struct shading_info
     vec3f p;
     vec3f n;
     vec3f c;
+    enum direction { IN, OUT } d;
 };
-
-#if 0
-
-struct csg_node
-{
-    enum direction { IN, OUT } ;
-    struct direction_hit
-    {
-        float t;
-        direction what;
-        vec3f n;
-    };
-    virtual direction classify(const vec3f& point) = 0;
-    virtual bool intersect(const ray& ray, const range& r, direction_hit* hit) = 0;
-};
-
-struct csg_sphere : csg_node
-{
-};
-
-struct csg_transformation : csg_node
-{
-};
-
-// half_space
-// cylinder
-// cone
-// torus
-// polyhedron
-// union
-// intersection
-// difference
-
-struct csg_object
-{
-    struct surface_info
-    {
-        vec3f p;
-        vec3f n;
-    };
-    csg_node* root;
-    // mapping from coord to color, maybe texture, maybe shader, who knows
-    // intersect returning a shading_info?
-};
-
-#endif
 
 struct shape
 {
     virtual bool intersect(const ray& ray, const range& r, shading_info* shade) = 0;
+    virtual vec3f random_from_point(const vec3f& point) = 0;
 };
 
 bool intersect_triangle(const vec3f* vertices, const ray& ray, const range& r, triangle_hit* hit)
@@ -132,51 +89,166 @@ vec3f randomInTriangle(const vec3f* vertices)
 
 struct triangle : public shape
 {
-    vec3f vertices[3];
+    std::array<vec3f, 3> vertices;
     triangle(const vec3f* vertices_)
     {
-        vertices[0] = vertices_[0];
-        vertices[1] = vertices_[1];
-        vertices[2] = vertices_[2];
+        std::copy(vertices_, vertices_ + 3, vertices.begin());
     }
     virtual bool intersect(const ray& ray, const range& r, shading_info* shade)
     {
         triangle_hit hit;
-        bool hits = intersect_triangle(vertices, ray, r, &hit);
+        bool hits = intersect_triangle(vertices.data(), ray, r, &hit);
         if(hits) {
-            shade->p = uvwTriangleToPoint(vertices, hit.uvw[0], hit.uvw[1], hit.uvw[2]);
+            shade->p = uvwTriangleToPoint(vertices.data(), hit.uvw[0], hit.uvw[1], hit.uvw[2]);
             shade->n = {0, 0, 0}; // XXX
             shade->c = {1, 1, 1}; // XXX
         }
         return hits;
     }
+    virtual vec3f random_from_point(const vec3f& point)
+    {
+        // XXX ignore point for now
+        return randomInTriangle(vertices.data());
+    }
 };
 
-vec3f cast(float u, float v)
+struct csg_node
+{
+    struct direction_hit
+    {
+        float t;
+        shading_info::direction d;
+        vec3f n;
+    };
+    virtual shading_info::direction classify(const vec3f& point) = 0;
+    virtual bool intersect(const ray& ray, const range& r, direction_hit* hit) = 0;
+    virtual vec3f random_from_point(const vec3f& from) = 0;
+};
+
+struct csg_sphere : csg_node
+{
+    vec3f center;
+    float radius;
+
+    csg_sphere(const vec3f &center, float radius) :
+        center(center),
+        radius(radius)
+    {}
+
+    virtual shading_info::direction classify(const vec3f& point)
+    {
+        return (vec_length(point - center) < radius) ? shading_info::IN : shading_info::OUT;
+    }
+
+    virtual bool intersect(const ray& ray, const range& r, direction_hit* hit)
+    {
+        vec3f oc = ray.m_origin - center;
+        float a = vec_dot(ray.m_direction, ray.m_direction);
+        float half_b = vec_dot(oc, ray.m_direction);
+        float c = vec_dot(oc, oc) - radius * radius;
+        float discriminant = half_b * half_b - a * c;
+        if (discriminant < 0) {
+            return false;
+        }
+
+        float sd = sqrtf(discriminant);
+
+        // Find the nearest root that lies in the acceptable range.
+        float root = (-half_b - sd) / a;
+        if (root < r.t0 || r.t1 < root) {
+            root = (-half_b + sd) / a;
+            if (root < r.t0 || r.t1 < root) {
+                return false;
+            }
+        }
+
+        vec3f point = ray.at(root);
+        vec3f normal = (point - center) / radius;
+
+        hit->t = root;
+        bool into = (vec_dot(ray.m_direction, normal) < 0);
+        hit->d = into ? shading_info::IN : shading_info::OUT;
+        hit->n = into ? normal : -normal;
+
+        return true;
+    }
+
+    virtual vec3f random_from_point(const vec3f& from)
+    {
+        return {0, 0, 0}; // XXX XXX!
+    }
+};
+
+#if 0
+
+struct csg_transformation : csg_node
+{
+};
+
+// half_space
+// cylinder
+// cone
+// torus
+// polyhedron
+// union
+// intersection
+// difference
+
+#endif
+
+struct csg_shape : public shape
+{
+    csg_node* root;
+
+    csg_shape(csg_node *root) :
+        root(root)
+    { }
+
+    // mapping from coord to color, maybe texture, maybe shader
+
+    virtual bool intersect(const ray& ray, const range& r, shading_info* shade)
+    {
+        csg_node::direction_hit hit;
+        bool hits = root->intersect(ray, r, &hit);
+        if(hits) {
+            shade->p = ray.m_origin + ray.m_direction * hit.t;
+            shade->n = hit.n;
+            shade->c = {1, 1, 1}; // XXX
+            shade->d = hit.d; // XXX
+        }
+
+        return hits;
+    }
+
+    virtual vec3f random_from_point(const vec3f& point)
+    {
+        // XXX ignore point for now
+        return root->random_from_point(point);
+    }
+};
+
+
+vec3f cast(float u, float v, shape* scene, shape* light)
 {
     vec3f onplane = {(u - .5f) * 2, (v - .5f) * 2, -1.0f}; // one meter away down Z
-    vec3f light_vertices[3] = {{.3, .3, 0}, {.3, .6, 0}, {.6, .6, 0}};
-    triangle light(light_vertices);
-
-    vec3f blocker_vertices[3] = {{0, 0, -1}, {.4, .3, -.8}, {.3, .4, -.8}};
-    triangle blocker(blocker_vertices);
-
     shading_info shade;
 
     ray blockerTestRay = {{0, 0, 0}, onplane};
 
-    if(blocker.intersect(blockerTestRay, {-FLT_MAX, FLT_MAX}, &shade)) {
+    if(scene->intersect(blockerTestRay, {-FLT_MAX, FLT_MAX}, &shade)) {
 
-        return {1, 1, 1};
+        // return {1, 1, 1};
+        vec3f lightpoint = light->random_from_point(onplane);
+        return vec3f(1, 1, 1) * std::clamp(vec_dot(shade.n, vec_normalize(lightpoint - shade.p)), 0.0f, 1.0f);
 
     } else {
 
         /* cast to random points on light */
-        vec3f lightpoint = randomInTriangle(light_vertices);
+        vec3f lightpoint = light->random_from_point(onplane);
 
         ray shadowTestRay = {onplane, vec_normalize(lightpoint - onplane)};
 
-        if(!blocker.intersect(shadowTestRay, {-FLT_MAX, FLT_MAX}, &shade)) {
+        if(!scene->intersect(shadowTestRay, {-FLT_MAX, FLT_MAX}, &shade)) {
 
             // return {u, v, .5};
             return {fabsf(shadowTestRay.m_direction[0]), fabsf(shadowTestRay.m_direction[1]), fabsf(shadowTestRay.m_direction[2])};
@@ -190,8 +262,17 @@ int main(int argc, char **argv)
 {
     constexpr int width = 512;
     constexpr int height = 512;
-    constexpr int sampleCount = 1;
+    constexpr int sampleCount = 16;
     uint8_t img[height * width * 3];
+
+    vec3f light_vertices[3] = {{.3, .3, 0}, {.3, .6, 0}, {.6, .6, 0}};
+    triangle light(light_vertices);
+
+    vec3f blocker_vertices[3] = {{0, 0, -1}, {.4, .3, -.8}, {.3, .4, -.8}};
+    triangle blocker(blocker_vertices);
+
+    csg_sphere blocker_sphere_node { { .2, .2, -.8}, .2 };
+    csg_shape blocker2(&blocker_sphere_node);
 
     for(int y = 0; y < height; y++) {
         for(int x = 0; x < width; x++) {
@@ -208,7 +289,7 @@ int main(int argc, char **argv)
                 float u = (x + drand48()) / width;
                 float v = (y + drand48()) / height;
 
-                sum += cast(u, v);
+                sum += cast(u, v, &blocker2, &light);
             }
 
             pixel[0] = sum.x / sampleCount * 255;
